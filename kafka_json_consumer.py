@@ -1,15 +1,8 @@
-# Kafka with JSONSerializer
-
 import os
 import argparse
-from uuid import uuid4
-from six.moves import input
-from confluent_kafka import Producer
-from confluent_kafka.serialization import StringSerializer, SerializationContext, MessageField
-from confluent_kafka.schema_registry import SchemaRegistryClient
-from confluent_kafka.schema_registry.json_schema import JSONSerializer
-import pandas as pd
-from typing import List
+from confluent_kafka import Consumer
+from confluent_kafka.serialization import SerializationContext, MessageField
+from confluent_kafka.schema_registry.json_schema import JSONDeserializer
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -23,10 +16,6 @@ SSL_MACHENISM = os.getenv("SSL_MACHENISM")
 SCHEMA_REGISTRY_API_KEY = os.getenv("SCHEMA_REGISTRY_API_KEY")
 SCHEMA_REGISTRY_API_SECRET = os.getenv("SCHEMA_REGISTRY_API_SECRET")
 
-FILE_PATH = "cardekho_dataset.csv"
-columns=['car_name', 'brand', 'model', 'vehicle_age', 'km_driven', 'seller_type',
-       'fuel_type', 'transmission_type', 'mileage', 'engine', 'max_power',
-       'seats', 'selling_price']
 
 def sasl_conf():
 
@@ -63,45 +52,6 @@ class Car:
 
     def __str__(self):
         return f"{self.record}"
-
-
-def get_car_instance(file_path):
-    df=pd.read_csv(file_path)
-    df=df.iloc[:,1:]
-    cars:List[Car]=[]
-    for data in df.values:
-        car=Car(dict(zip(columns,data)))
-        cars.append(car)
-        yield car
-
-def car_to_dict(car:Car, ctx):
-    """
-    Returns a dict representation of a User instance for serialization.
-    Args:
-        user (User): User instance.
-        ctx (SerializationContext): Metadata pertaining to the serialization
-            operation.
-    Returns:
-        dict: Dict populated with user attributes to be serialized.
-    """
-
-    # User._address must not be serialized; omit from dict
-    return car.record
-
-
-def delivery_report(err, msg):
-    """
-    Reports the success or failure of a message delivery.
-    Args:
-        err (KafkaError): The error that occurred on None on success.
-        msg (Message): The message that was produced or failed.
-    """
-
-    if err is not None:
-        print("Delivery failed for User record {}: {}".format(msg.key(), err))
-        return
-    print('User record {} successfully produced to {} [{}] at offset {}'.format(
-        msg.key(), msg.topic(), msg.partition(), msg.offset()))
 
 
 def main(topic):
@@ -170,37 +120,33 @@ def main(topic):
   "type": "object"
 }
     """
-    schema_registry_conf = schema_config()
-    schema_registry_client = SchemaRegistryClient(schema_registry_conf)
+    json_deserializer = JSONDeserializer(schema_str,
+                                         from_dict=Car.dict_to_car)
 
-    string_serializer = StringSerializer('utf_8')
-    json_serializer = JSONSerializer(schema_str, schema_registry_client, car_to_dict)
+    consumer_conf = sasl_conf()
+    consumer_conf.update({
+                     'group.id': 'group1',
+                     'auto.offset.reset': "earliest"})
 
-    producer = Producer(sasl_conf())
+    consumer = Consumer(consumer_conf)
+    consumer.subscribe([topic])
 
-    print("Producing user records to topic {}. ^C to exit.".format(topic))
-    #while True:
-        # Serve on_delivery callbacks from previous calls to produce()
-    producer.poll(0.0)
-    try:
-        # count = 0
-        for car in get_car_instance(file_path=FILE_PATH):
 
-            print(car)
-            producer.produce(topic=topic,
-                            key=string_serializer(str(uuid4()), car_to_dict),
-                            value=json_serializer(car, SerializationContext(topic, MessageField.VALUE)),
-                            on_delivery=delivery_report)
-            # if count == 1000:
-            #     break
-            # count+=1
-    except KeyboardInterrupt:
-        pass
-    except ValueError:
-        print("Invalid input, discarding record...")
-        pass
+    while True:
+        try:
+            # SIGINT can't be handled when polling, limit timeout to 1 second.
+            msg = consumer.poll(1.0)
+            if msg is None:
+                continue
 
-    print("\nFlushing records...")
-    producer.flush()
+            car = json_deserializer(msg.value(), SerializationContext(msg.topic(), MessageField.VALUE))
+
+            if car is not None:
+                print("User record {}: car: {}\n"
+                      .format(msg.key(), car))
+        except KeyboardInterrupt:
+            break
+
+    consumer.close()
 
 main("hands-on")
